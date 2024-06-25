@@ -1,0 +1,15 @@
+{:paths     ["src"]
+ :mvn/repos {"maven_central" {:url "https://repo.maven.apache.org/maven2/"}}
+ :deps      {
+             org.clojure/clojure         {:mvn/version "1.11.3"}
+             software.amazon.awssdk/ec2  {:mvn/version "2.26.8"}
+             com.cleancoders.c3kit/apron {:mvn/version "2.1.4"}
+             }
+ :aliases   {
+             :test {:extra-deps  {speclj/speclj {:mvn/version "3.4.8"}}
+                    :extra-paths ["spec"]
+                    :main-opts   ["-m" "speclj.main" "-c" "-t" "~slow"]}
+             :antq {:deps      {com.github.liquidz/antq {:mvn/version "2.8.1201"}}
+                    :main-opts ["-m" "antq.core"]}
+             }
+ }
