@@ -1,5 +1,6 @@
 (ns inf.ec2-spec
-  (:require [c3kit.apron.env :as env]
+  (:require [c3kit.apron.corec :as ccc]
+            [c3kit.apron.env :as env]
             [c3kit.apron.time :as time]
             [inf.ec2 :as sut]
             [speclj.core :refer :all])
@@ -7,13 +8,7 @@
            (software.amazon.awssdk.auth.credentials AwsCredentialsProvider)
            (software.amazon.awssdk.regions Region)
            (software.amazon.awssdk.services.ec2 DefaultEc2ClientBuilder Ec2Client Ec2ClientBuilder)
-           (software.amazon.awssdk.services.ec2.model DescribeImagesResponse DescribeInstancesResponse DescribeSecurityGroupsResponse GroupIdentifier Image Instance InstanceState InstanceStateChange InstanceType IpPermission IpRange Reservation RunInstancesResponse SecurityGroup Tag TerminateInstancesRequest TerminateInstancesResponse)))
-
-(defn ->tag [key value]
-  (-> (Tag/builder)
-      (.key key)
-      (.value value)
-      .build))
+           (software.amazon.awssdk.services.ec2.model DescribeImagesResponse DescribeInstancesResponse DescribeSecurityGroupsResponse GroupIdentifier Image Instance InstanceState InstanceStateChange InstanceType IpPermission IpRange Reservation RunInstancesResponse SecurityGroup TerminateInstancesRequest TerminateInstancesResponse)))
 
 (defn ->ip-range [cidr-ip]
   (-> (IpRange/builder)
@@ -48,8 +43,8 @@
       (.publicIpAddress "public ip")
       (.instanceType InstanceType/T2_SMALL)
       (.state (->state "running"))
-      (.tags [(->tag "tag-key-1" "tag-value-1")
-              (->tag "tag-key-2" "tag-value-2")])
+      (.tags [(sut/->tag "tag-key-1" "tag-value-1")
+              (sut/->tag "tag-key-2" "tag-value-2")])
       .build))
 
 (def running-map
@@ -74,8 +69,8 @@
       (.description "the first group")
       (.ipPermissions [(->ip-permission 22 23 "tcp" [])
                        (->ip-permission 4334 4334 "udp" ["0.0.0.0/0" "1.1.1.1/1"])])
-      (.tags [(->tag "tag-1-key" "tag-1-val")
-              (->tag "tag-2-key" "tag-2-val")])
+      (.tags [(sut/->tag "tag-1-key" "tag-1-val")
+              (sut/->tag "tag-2-key" "tag-2-val")])
       .build))
 
 (def group-1-map
@@ -147,8 +142,8 @@
       (.state "available")
       (.description "this is a clojure image")
       (.name "clojure")
-      (.tags [(->tag "java-key" "java-17")
-              (->tag "clj-key" "clojure-1.11.1")])
+      (.tags [(sut/->tag "java-key" "java-17")
+              (sut/->tag "clj-key" "clojure-1.11.1")])
       (.creationDate "2022-01-03T13:22:09.000Z")
       .build))
 
@@ -169,7 +164,7 @@
       (.state "failed")
       (.description "this is not a self-made image")
       (.name "visual-basic")
-      (.tags [(->tag "net-framework" "net-4.3.7")])
+      (.tags [(sut/->tag "net-framework" "net-4.3.7")])
       (.creationDate "2006-09-22T01:23:45.000Z")
       .build))
 
@@ -186,14 +181,19 @@
       (.groupId id)
       .build))
 
+(defn instance-request->tags [request]
+  (->> (.tagSpecifications request)
+       (filter #(= "instance" (.resourceTypeAsString %)))
+       (mapcat #(.tags %))))
+
 (defn ->instance [request]
-  (let [^List groups (map ->group-id (.securityGroupIds request))]
-    (-> (Instance/builder)
-        (.imageId (.imageId request))
-        (.instanceType (.instanceType request))
-        (.securityGroups groups)
-        (.keyName (.keyName request))
-        .build)))
+  (-> (Instance/builder)
+      (.imageId (.imageId request))
+      (.instanceType (.instanceType request))
+      (.securityGroups ^List (map ->group-id (.securityGroupIds request)))
+      (.tags ^List (instance-request->tags request))
+      (.keyName (.keyName request))
+      .build))
 
 (defn ->run-instances-response [request]
   (assert (= 1 (.minCount request) (.maxCount request)) "min and max counts must be 1")
@@ -219,17 +219,50 @@
 
 (describe "EC2"
 
-  (it "launch"
-    (let [client   (->proxied-client)
-          instance (sut/launch client {:ami      "ami-id"
-                                       :type     "t2.micro"
-                                       :key-name "my-key"
-                                       :groups   ["sg-123" "sg-456"]})]
-      (should-be-a Instance instance)
-      (should= "ami-id" (.imageId instance))
-      (should= "t2.micro" (.instanceTypeAsString instance))
-      (should= "my-key" (.keyName instance))
-      (should= ["sg-123" "sg-456"] (map #(.groupId %) (.securityGroups instance)))))
+  (context "launch"
+
+    (it "with string type"
+      (let [client   (->proxied-client)
+            instance (sut/launch client {:ami      "ami-id"
+                                         :type     "t2.micro"
+                                         :key-name "my-key"
+                                         :groups   ["sg-123" "sg-456"]})]
+        (should-be-a Instance instance)
+        (should= "ami-id" (.imageId instance))
+        (should= "t2.micro" (.instanceTypeAsString instance))
+        (should= "my-key" (.keyName instance))
+        (should= ["sg-123" "sg-456"] (map #(.groupId %) (.securityGroups instance)))
+        (should= [] (.tags instance))))
+
+    (it "with keyword type"
+      (let [client   (->proxied-client)
+            instance (sut/launch client {:ami      "ami-id"
+                                         :type     :t3.medium
+                                         :key-name "my-key"
+                                         :groups   ["sg-123" "sg-456"]})]
+        (should-be-a Instance instance)
+        (should= "ami-id" (.imageId instance))
+        (should= "t3.medium" (.instanceTypeAsString instance))
+        (should= "my-key" (.keyName instance))
+        (should= ["sg-123" "sg-456"] (map #(.groupId %) (.securityGroups instance)))
+        (should= [] (.tags instance))))
+
+    (it "with tags"
+      (let [client   (->proxied-client)
+            instance (sut/launch client {:ami      "ami-id"
+                                         :type     :t3.medium
+                                         :key-name "my-key"
+                                         :groups   ["sg-123" "sg-456"]
+                                         :tags     {"first"  "one"
+                                                    "second" "two"}})]
+        (should-be-a Instance instance)
+        (should= "ami-id" (.imageId instance))
+        (should= "t3.medium" (.instanceTypeAsString instance))
+        (should= "my-key" (.keyName instance))
+        (should= ["sg-123" "sg-456"] (map #(.groupId %) (.securityGroups instance)))
+        (should= {"first" "one" "second" "two"} (reduce (fn [m t] (assoc m (.key t) (.value t))) {} (.tags instance)))))
+
+    )
 
   (context "Client"
 
@@ -318,20 +351,20 @@
 
     (it "no instances"
       (let [client    (->proxied-client)
-            response  (sut/terminate client)
+            response  (sut/terminate client [])
             instances (.terminatingInstances response)]
         (should-be empty? instances)))
 
     (it "one instance"
       (let [client    (->proxied-client)
-            response  (sut/terminate client "instance-1")
+            response  (sut/terminate client ["instance-1"])
             instances (.terminatingInstances response)]
         (should= 1 (count instances))
         (should= "instance-1" (.instanceId (first instances)))))
 
     (it "two instances"
       (let [client    (->proxied-client)
-            response  (sut/terminate client "instance-1" "instance-2")
+            response  (sut/terminate client ["instance-1" "instance-2"])
             instances (.terminatingInstances response)]
         (should= 2 (count instances))
         (should= "instance-1" (.instanceId (first instances)))
@@ -375,22 +408,31 @@
     (after (.close @ec2))
 
     (it "instances"
-      (run! prn (sut/instances @ec2)))
+      (let [instances (sut/instances @ec2)]
+        (prn "count:" (count instances))
+        (prn "running:" (ccc/count-by instances :state :running))
+        (run! prn (ccc/find-by instances :tags ["noob"]))))
+
+    #_(it "terminate"
+        (let [instances (ccc/find-by (sut/instances @ec2) :launched-at ['>= (time/local 2024 6 28 8 31)])])
+        (sut/terminate @ec2 (map :id :instances)))
 
     (it "security groups"
-      (run! prn (sut/security-groups @ec2)))
+      (run! prn (ccc/find-by (sut/security-groups @ec2) :name ["ssh" "web"])))
 
     (it "images"
-      (run! prn (sut/images @ec2)))
+      (run! prn (ccc/find-by (sut/images @ec2) :tags ["java-21" "clojure-1.11.13"])))
 
     (it "launch"
-      (let [group-1  "sg-one"
-            group-2  "sg-two"
+      (let [groups   (ccc/find-by (sut/security-groups @ec2) :name ["ssh" "web"])
+            ami      (ccc/ffind-by (sut/images @ec2) :tags ["java-21" "clojure-1.11.13"])
             instance (sut/launch @ec2
-                                 :ami "ami-foobar"
-                                 :key-name "key-name"
+                                 :ami (:id ami)
+                                 :key-name "Macbook"
                                  :type "t2.small"
-                                 :groups [group-1 group-2])]
+                                 :groups (map :id groups)
+                                 :tags {"test-key"  "test-value"
+                                        "other-key" "other-value"})]
         (prn "instance-id:" (.instanceId instance))))
     )
   )

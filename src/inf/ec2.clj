@@ -6,7 +6,7 @@
            (software.amazon.awssdk.auth.credentials AwsBasicCredentials AwsCredentialsProvider StaticCredentialsProvider)
            (software.amazon.awssdk.regions Region)
            (software.amazon.awssdk.services.ec2 Ec2Client)
-           (software.amazon.awssdk.services.ec2.model DescribeImagesRequest Instance InstanceType RunInstancesRequest TerminateInstancesRequest)))
+           (software.amazon.awssdk.services.ec2.model DescribeImagesRequest Instance InstanceType RunInstancesRequest Tag TagSpecification TerminateInstancesRequest)))
 
 (defn- ^AwsCredentialsProvider ->credentials-provider [access-key secret-key]
   (-> (AwsBasicCredentials/create access-key secret-key)
@@ -54,7 +54,7 @@
   (->> (.reservations (.describeInstances client))
        (mapcat #(map <-instance (.instances %)))))
 
-(defn terminate [client & instance-ids]
+(defn terminate [client instance-ids]
   (.terminateInstances
     client
     (-> (TerminateInstancesRequest/builder)
@@ -101,11 +101,25 @@
   (->> (.images (.describeImages client images-request))
        (map <-image)))
 
-(defn ->launch-request [{:keys [ami type key-name groups]}]
+(defn ->tag
+  ([[k v]] (->tag k v))
+  ([k v] (-> (Tag/builder)
+             (.key k)
+             (.value v)
+             .build)))
+
+(defn- ->tag-specification [tags]
+  (-> (TagSpecification/builder)
+      (.resourceType "instance")
+      (.tags ^List (map ->tag tags))
+      .build))
+
+(defn ->launch-request [{:keys [ami type key-name groups tags]}]
   (-> (RunInstancesRequest/builder)
       (.imageId ami)
-      (.instanceType (InstanceType/fromValue type))
+      (.instanceType (InstanceType/fromValue (name type)))
       (.keyName key-name)
+      (.tagSpecifications [(->tag-specification tags)])
       (.securityGroupIds ^List groups)
       (.minCount (int 1))
       (.maxCount (int 1))
