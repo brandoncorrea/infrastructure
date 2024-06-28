@@ -8,7 +8,7 @@
            (software.amazon.awssdk.auth.credentials AwsCredentialsProvider)
            (software.amazon.awssdk.regions Region)
            (software.amazon.awssdk.services.ec2 DefaultEc2ClientBuilder Ec2Client Ec2ClientBuilder)
-           (software.amazon.awssdk.services.ec2.model DescribeImagesResponse DescribeInstancesResponse DescribeSecurityGroupsResponse GroupIdentifier Image Instance InstanceState InstanceStateChange InstanceType IpPermission IpRange Reservation RunInstancesResponse SecurityGroup TerminateInstancesRequest TerminateInstancesResponse)))
+           (software.amazon.awssdk.services.ec2.model DescribeImagesResponse DescribeInstancesResponse DescribeKeyPairsResponse DescribeSecurityGroupsResponse GroupIdentifier Image Instance InstanceState InstanceStateChange InstanceType IpPermission IpRange KeyPairInfo Reservation RunInstancesResponse SecurityGroup TerminateInstancesRequest TerminateInstancesResponse)))
 
 (defn ->ip-range [cidr-ip]
   (-> (IpRange/builder)
@@ -201,10 +201,38 @@
       (.instances [(->instance request)])
       .build))
 
-(defn ->proxied-client [& {:keys [reservations images groups]}]
+(def empty-key-pair (.build (KeyPairInfo/builder)))
+(def ubuntu-key-pair
+  (-> (KeyPairInfo/builder)
+      (.keyPairId "ubuntu-key")
+      (.keyFingerprint "the-fingerprint")
+      (.keyName "Ubuntu")
+      (.keyType "rsa")
+      (.tags [(sut/->tag "the-key" "the-value")])
+      (.publicKey "the-public-key")
+      (.createTime (->utc-instant 2024 1 2 3 4 5))
+      .build))
+
+(def ubuntu-key-map
+  {:id          "ubuntu-key"
+   :fingerprint "the-fingerprint"
+   :name        "Ubuntu"
+   :type        :rsa
+   :tags        #{"the-value"}
+   :public-key  "the-public-key"
+   :created-at  (time/utc 2024 1 2 3 4 5)})
+
+(defn ->describe-key-pairs-response [key-pairs]
+  (-> (DescribeKeyPairsResponse/builder)
+      (.keyPairs ^List key-pairs)
+      (.build)))
+
+(defn ->proxied-client [& {:keys [reservations images groups key-pairs]}]
   (proxy [Ec2Client] []
     (describeInstances []
       (->describe-instances-response reservations))
+    (describeKeyPairs [_request]
+      (->describe-key-pairs-response key-pairs))
     (describeImages [request]
       (->describe-images-response request images))
     (describeSecurityGroups []
@@ -227,12 +255,11 @@
                                          :type     "t2.micro"
                                          :key-name "my-key"
                                          :groups   ["sg-123" "sg-456"]})]
-        (should-be-a Instance instance)
-        (should= "ami-id" (.imageId instance))
-        (should= "t2.micro" (.instanceTypeAsString instance))
-        (should= "my-key" (.keyName instance))
-        (should= ["sg-123" "sg-456"] (map #(.groupId %) (.securityGroups instance)))
-        (should= [] (.tags instance))))
+        (should= "ami-id" (:image instance))
+        (should= :t2.micro (:type instance))
+        (should= "my-key" (:key-name instance))
+        (should= #{"sg-123" "sg-456"} (:groups instance))
+        (should-not-contain :tags instance)))
 
     (it "with keyword type"
       (let [client   (->proxied-client)
@@ -240,12 +267,11 @@
                                          :type     :t3.medium
                                          :key-name "my-key"
                                          :groups   ["sg-123" "sg-456"]})]
-        (should-be-a Instance instance)
-        (should= "ami-id" (.imageId instance))
-        (should= "t3.medium" (.instanceTypeAsString instance))
-        (should= "my-key" (.keyName instance))
-        (should= ["sg-123" "sg-456"] (map #(.groupId %) (.securityGroups instance)))
-        (should= [] (.tags instance))))
+        (should= "ami-id" (:image instance))
+        (should= :t3.medium (:type instance))
+        (should= "my-key" (:key-name instance))
+        (should= #{"sg-123" "sg-456"} (:groups instance))
+        (should-not-contain :tags instance)))
 
     (it "with tags"
       (let [client   (->proxied-client)
@@ -255,12 +281,11 @@
                                          :groups   ["sg-123" "sg-456"]
                                          :tags     {"first"  "one"
                                                     "second" "two"}})]
-        (should-be-a Instance instance)
-        (should= "ami-id" (.imageId instance))
-        (should= "t3.medium" (.instanceTypeAsString instance))
-        (should= "my-key" (.keyName instance))
-        (should= ["sg-123" "sg-456"] (map #(.groupId %) (.securityGroups instance)))
-        (should= {"first" "one" "second" "two"} (reduce (fn [m t] (assoc m (.key t) (.value t))) {} (.tags instance)))))
+        (should= "ami-id" (:image instance))
+        (should= :t3.medium (:type instance))
+        (should= "my-key" (:key-name instance))
+        (should= #{"sg-123" "sg-456"} (:groups instance))
+        (should= #{"one" "two"} (:tags instance))))
 
     )
 
@@ -400,6 +425,30 @@
 
     )
 
+  (context "key-pairs"
+
+    (it "none"
+      (let [client (->proxied-client)
+            images (sut/key-pairs client)]
+        (should-be empty? images)))
+
+    (it "one empty key-pair"
+      (let [client (->proxied-client :key-pairs [empty-key-pair])
+            images (sut/key-pairs client)]
+        (should= [{}] images)))
+
+    (it "one populated key-pair"
+      (let [client (->proxied-client :key-pairs [ubuntu-key-pair])
+            images (sut/key-pairs client)]
+        (should= [ubuntu-key-map] images)))
+
+    (it "two key-pairs"
+      (let [client (->proxied-client :key-pairs [empty-key-pair ubuntu-key-pair])
+            images (sut/key-pairs client)]
+        (should= [{} ubuntu-key-map] images)))
+
+    )
+
   (context "real calls"
 
     (tags :slow)
@@ -408,14 +457,21 @@
     (after (.close @ec2))
 
     (it "instances"
-      (let [instances (sut/instances @ec2)]
+      (let [instances (sut/instances @ec2)
+            live      (ccc/find-by instances :state ['not= :terminated])]
         (prn "count:" (count instances))
-        (prn "running:" (ccc/count-by instances :state :running))
-        (run! prn (ccc/find-by instances :tags ["noob"]))))
+        (prn "live:" (count live))
+        (run! prn live)))
+
+    (it "key-pairs"
+      (let [pairs (sut/key-pairs @ec2)]
+        (prn "count" (count pairs))
+        (run! prn pairs)))
 
     #_(it "terminate"
-        (let [instances (ccc/find-by (sut/instances @ec2) :launched-at ['>= (time/local 2024 6 28 8 31)])])
-        (sut/terminate @ec2 (map :id :instances)))
+        (let [instances (sut/instances @ec2)
+              found     (ccc/find-by instances :tags ["test"])]
+          (sut/terminate @ec2 (map :id found))))
 
     (it "security groups"
       (run! prn (ccc/find-by (sut/security-groups @ec2) :name ["ssh" "web"])))
@@ -423,16 +479,16 @@
     (it "images"
       (run! prn (ccc/find-by (sut/images @ec2) :tags ["java-21" "clojure-1.11.13"])))
 
-    (it "launch"
-      (let [groups   (ccc/find-by (sut/security-groups @ec2) :name ["ssh" "web"])
-            ami      (ccc/ffind-by (sut/images @ec2) :tags ["java-21" "clojure-1.11.13"])
-            instance (sut/launch @ec2
-                                 :ami (:id ami)
-                                 :key-name "Macbook"
-                                 :type "t2.small"
-                                 :groups (map :id groups)
-                                 :tags {"test-key"  "test-value"
-                                        "other-key" "other-value"})]
-        (prn "instance-id:" (.instanceId instance))))
+    #_(it "launch"
+        (let [groups   (ccc/find-by (sut/security-groups @ec2) :name ["ssh" "web"])
+              ami      (ccc/ffind-by (sut/images @ec2) :tags ["java-21" "clojure-1.11.13"])
+              instance (sut/launch @ec2
+                                   :ami (:id ami)
+                                   :key-name "Macbook"
+                                   :type "t2.small"
+                                   :groups (map :id groups)
+                                   :tags {"app" "test"
+                                          "env" "staging"})]
+          (prn "instance:" instance)))
     )
   )

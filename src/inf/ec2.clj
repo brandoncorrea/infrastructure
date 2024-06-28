@@ -6,7 +6,7 @@
            (software.amazon.awssdk.auth.credentials AwsBasicCredentials AwsCredentialsProvider StaticCredentialsProvider)
            (software.amazon.awssdk.regions Region)
            (software.amazon.awssdk.services.ec2 Ec2Client)
-           (software.amazon.awssdk.services.ec2.model DescribeImagesRequest Instance InstanceType RunInstancesRequest Tag TagSpecification TerminateInstancesRequest)))
+           (software.amazon.awssdk.services.ec2.model DescribeImagesRequest DescribeKeyPairsRequest Instance InstanceType RunInstancesRequest Tag TagSpecification TerminateInstancesRequest)))
 
 (defn- ^AwsCredentialsProvider ->credentials-provider [access-key secret-key]
   (-> (AwsBasicCredentials/create access-key secret-key)
@@ -37,6 +37,9 @@
            (map #(.value %))
            set))
 
+(defn- <-groups [groups]
+  (some-> (map #(.groupId %) groups) seq set))
+
 (defn- <-instance [^Instance instance]
   (ccc/remove-nils
     {:id          (.instanceId instance)
@@ -46,6 +49,8 @@
      :private-ip  (.privateIpAddress instance)
      :public-dns  (.publicDnsName instance)
      :public-ip   (.publicIpAddress instance)
+     :key-name    (.keyName instance)
+     :groups      (<-groups (.securityGroups instance))
      :type        (keyword (.instanceTypeAsString instance))
      :state       (some-> (.state instance) .name str keyword)
      :tags        (<-tags (.tags instance))}))
@@ -101,6 +106,21 @@
   (->> (.images (.describeImages client images-request))
        (map <-image)))
 
+(defn- <-key-pair [pair]
+  (ccc/remove-nils
+    {:id          (.keyPairId pair)
+     :fingerprint (.keyFingerprint pair)
+     :name        (.keyName pair)
+     :type        (keyword (.keyTypeAsString pair))
+     :tags        (<-tags (.tags pair))
+     :public-key  (.publicKey pair)
+     :created-at  (some->> (.createTime pair) .toEpochMilli time/from-epoch)}))
+
+(def key-pairs-request (.build (DescribeKeyPairsRequest/builder)))
+(defn key-pairs [client]
+  (->> (.keyPairs (.describeKeyPairs client key-pairs-request))
+       (map <-key-pair)))
+
 (defn ->tag
   ([[k v]] (->tag k v))
   ([k v] (-> (Tag/builder)
@@ -129,4 +149,5 @@
   (->> (->launch-request options)
        (.runInstances client)
        .instances
-       first))
+       first
+       <-instance))
